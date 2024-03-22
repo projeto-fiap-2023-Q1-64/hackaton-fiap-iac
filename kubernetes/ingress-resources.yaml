@@ -1,0 +1,24 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: nginx-ingress-controller
+  annotations:
+    kubernetes.io/ingress.class: "nginx" 
+spec:
+  rules:
+  - http:
+      paths:
+      - path: /identificacao
+        pathType: Prefix
+        backend:
+          service:
+            name: identificacao
+            port:
+              number: 80
+      - path: /ponto
+        pathType: Prefix
+        backend:
+          service:
+            name: ponto
+            port:
+              number: 80

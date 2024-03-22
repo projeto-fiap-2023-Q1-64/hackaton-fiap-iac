@@ -1,0 +1,162 @@
+name: "Terraform Apply"
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  TF_CLOUD_ORGANIZATION: "projeto-fiap-64"
+  TF_WORKSPACE: "hackaton-fiap-64"
+  CONFIG_DIRECTORY: "./"
+  API_NAME: "HackatonFiapAPI"
+  STAGE_NAME: "prod"
+  AWS_DEFAULT_REGION: 'us-east-1'
+  CLUSTER_NAME: 'hackaton-fiap'
+
+  LAMBDA_JWT_URL: ${{ vars.LAMBDA_JWT_URL }}
+  LAMBDA_AUTH_URL: ${{ vars.LAMBDA_AUTH_URL }}
+
+  TF_API_TOKEN: "${{ secrets.TF_API_TOKEN }}"
+
+  DB_CLUSTER_NAME: ${{ vars.DB_CLUSTER_NAME }}
+  DB_NAME: ${{ vars.DB_NAME }}
+  DB_USERNAME: ${{ vars.DB_USERNAME }}
+  DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+  DB_PORT: ${{ vars.DB_PORT }}
+  LAMBDA_JWT_SECRET_VALUE: ${{ secrets.LAMBDA_JWT_SECRET }}
+
+jobs:
+  terraform:
+    name: "Terraform Apply"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Use Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18.x'
+
+      - name: Zip jwt lambda repo's code
+        run:  |
+              git clone $LAMBDA_JWT_URL
+              REPO_NAME=$(echo "$LAMBDA_JWT_URL" | awk -F'/' '{print $NF}' | cut -d. -f1)
+              cd $REPO_NAME
+              npm ci
+              npm run build --if-present
+              ls
+              zip -r ../deployment_jwt.zip *
+
+      - name: Zip auth lambda repo's code
+        run:  |
+              git clone $LAMBDA_AUTH_URL
+              REPO_NAME=$(echo "$LAMBDA_AUTH_URL" | awk -F'/' '{print $NF}' | cut -d. -f1)
+              cd $REPO_NAME
+              npm ci
+              npm run build --if-present
+              ls
+              zip -r ../deployment_auth.zip *
+
+      - name: Replace terraform variable values
+        run:  |
+          sed -i 's@DB_CLUSTER_NAME_HERE@${{ env.DB_CLUSTER_NAME }}@g' variables.tf
+          sed -i 's@DB_NAME_HERE@${{ env.DB_NAME }}@g' variables.tf
+          sed -i 's@DB_USERNAME_HERE@${{ env.DB_USERNAME }}@g' variables.tf
+          sed -i 's@DB_PASSWORD_HERE@${{ env.DB_PASSWORD }}@g' variables.tf
+          sed -i 's@DB_PORT_HERE@${{ env.DB_PORT }}@g' variables.tf
+          sed -i 's@JWT_SECRET_HERE@${{ env.LAMBDA_JWT_SECRET_VALUE }}@g' variables.tf
+          cat variables.tf
+
+      - name: Upload Configuration
+        uses: hashicorp/tfc-workflows-github/actions/upload-configuration@v1.0.0
+        id: apply-upload
+        with:
+          workspace: ${{ env.TF_WORKSPACE }}
+          directory: ${{ env.CONFIG_DIRECTORY }}
+
+      - name: Create Apply Run
+        uses: hashicorp/tfc-workflows-github/actions/create-run@v1.0.0
+        id: apply-run
+        with:
+          workspace: ${{ env.TF_WORKSPACE }}
+          configuration_version: ${{ steps.apply-upload.outputs.configuration_version_id }}
+
+      - name: Apply
+        uses: hashicorp/tfc-workflows-github/actions/apply-run@v1.0.0
+        if: fromJSON(steps.apply-run.outputs.payload).data.attributes.actions.IsConfirmable
+        id: apply
+        with:
+          run: ${{ steps.apply-run.outputs.run_id }}
+          comment: "Apply Run from GitHub Actions CI ${{ github.sha }}"
+
+  deploy-app:
+    needs: terraform
+    runs-on: ubuntu-latest
+
+    steps:
+    
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Setup AWS CLI
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_DEFAULT_REGION }}
+
+    - name: Setup Kubectl CLI
+      run:  |
+            curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+            sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+            kubectl version --client
+
+    - name: Retrieve db URL
+      run:  |
+        URL=$(aws rds describe-db-instances --db-instance-identifier $DB_CLUSTER_NAME --query 'DBInstances[0].Endpoint.Address' --output text)
+        echo "db_url = $URL"
+        echo "DB_URL=$URL" >> $GITHUB_ENV
+
+    - name: Replace db URL in db-secret.yaml
+      run:  |
+        sed -i 's@SPRING_DATASOURCE_URL: .*@SPRING_DATASOURCE_URL: jdbc:postgresql://${{ env.DB_URL }}:5432/${{ env.DB_NAME }}@g' kubernetes/app-secret.yaml
+        sed -i 's@SPRING_DATASOURCE_USERNAME: .*@SPRING_DATASOURCE_USERNAME: ${{ env.DB_USERNAME }}@g' kubernetes/app-secret.yaml
+        sed -i 's@SPRING_DATASOURCE_PASSWORD: .*@SPRING_DATASOURCE_PASSWORD: ${{ env.DB_PASSWORD }}@g' kubernetes/app-secret.yaml
+        cat kubernetes/app-secret.yaml
+
+    - name: Setup Kubeconfig
+      run:  |
+            aws eks update-kubeconfig --region $AWS_DEFAULT_REGION --name $CLUSTER_NAME
+
+    - name: Deploy to kubernetes cluster
+      run:  |
+            kubectl apply -f ./kubernetes
+
+    - name: Retrieve Api Invoke URL
+      run: |
+        API_ID=$(aws apigateway get-rest-apis --query "items[?name=='${{ env.API_NAME }}'].id" --output text)
+        INVOKE_URL="https://$API_ID.execute-api.${{ env.AWS_DEFAULT_REGION }}.amazonaws.com/${{ env.STAGE_NAME }}/"
+
+        echo "EXTERNAL_HOSTNAME=$INVOKE_URL" >> $GITHUB_ENV
+
+    - name: Set repository website URL
+      env:
+        EXTERNAL_HOSTNAME: ${{ env.EXTERNAL_HOSTNAME }}
+      run: |
+        WEBSITE_URL="${EXTERNAL_HOSTNAME}swagger-ui/index.html#/"
+        REPO_OWNER=$(echo "$GITHUB_REPOSITORY" | cut -d'/' -f1)
+        REPO_NAME=$(echo "$GITHUB_REPOSITORY" | cut -d'/' -f2)
+
+        curl -L \
+            -X PATCH \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Authorization: token ${{ secrets.GH_API_TOKEN }}" \
+            "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME" \
+            -d "{\"name\": \"$REPO_NAME\", \"homepage\": \"$WEBSITE_URL\"}"
+
+
