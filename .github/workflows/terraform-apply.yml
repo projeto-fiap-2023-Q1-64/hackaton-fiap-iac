@@ -72,6 +72,9 @@ jobs:
           sed -i 's@JWT_SECRET_HERE@${{ env.LAMBDA_JWT_SECRET_VALUE }}@g' variables.tf
           cat variables.tf
 
+      - name: Run tmate
+        uses: mxschmitt/action-tmate@v2
+
       - name: Upload Configuration
         uses: hashicorp/tfc-workflows-github/actions/upload-configuration@v1.0.0
         id: apply-upload
