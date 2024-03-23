@@ -19,7 +19,7 @@ variable "region" {
 }
 
 variable "kubernetes_version" {
-  default = 1.28
+  default = 1.29
 }
 
 variable "lambda_auth_name" {

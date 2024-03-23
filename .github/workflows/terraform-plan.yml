@@ -21,7 +21,7 @@ env:
   DB_CLUSTER_NAME: ${{ vars.DB_CLUSTER_NAME }}
   DB_NAME: ${{ vars.DB_NAME }}
   DB_USERNAME: ${{ vars.DB_USERNAME }}
-  DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+  DB_PASSWORD: ${{ secrets.PROJETOFIAP_DB_PASSWORD }}
   DB_PORT: ${{ vars.DB_PORT }}
   LAMBDA_JWT_SECRET_VALUE: ${{ secrets.LAMBDA_JWT_SECRET }}
 
