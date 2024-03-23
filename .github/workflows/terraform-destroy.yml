@@ -77,9 +77,13 @@ jobs:
       run: terraform plan -destroy -input=false
 
     - name: Terraform Destroy
-      run: terraform destroy -auto-approve -input=false
+      uses: nick-invision/retry@v2
+      with:
+        timeout_minutes: 30
+        max_attempts: 2
+        command: terraform destroy -auto-approve -input=false
 
-    - name: Remove repository website URL
+    - name: Remove website URL from repository
       run: |
         WEBSITE_URL=""
         REPO_OWNER=$(echo "$GITHUB_REPOSITORY" | cut -d'/' -f1)
